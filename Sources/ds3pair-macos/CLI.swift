@@ -44,6 +44,9 @@ func execute(command: String, args: [String], raw: Bool) {
     case "play":
         executePlay()
 
+    case "--version", "version":
+        print("ds3pair-macos \(DS3Constants.version)")
+
     default:
         print("Unknown command: \(command)\n")
         printHelp()
