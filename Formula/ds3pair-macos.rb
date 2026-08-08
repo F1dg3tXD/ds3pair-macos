@@ -2,7 +2,7 @@ class Ds3pairMacos < Formula
   desc "DualShock 3 pairing and diagnostic utility for macOS"
   homepage "https://github.com/F1dg3tXD/ds3pair-macos"
   url "https://github.com/F1dg3tXD/ds3pair-macos/archive/refs/tags/v0.0.4a.tar.gz"
-  sha256 "f2426d3b806f56587b23b9f4ab6fb3cb57acb34c2c1c730968f776984c9d6a6e"
+  sha256 "e3af582b3eceba4e5bf033bb01a42702d04d20776f92ce4c97c91c84e8ece24d"
   license "MIT"
 
   depends_on :xcode
