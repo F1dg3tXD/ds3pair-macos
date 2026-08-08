@@ -14,15 +14,3 @@ func discoverLocalBluetoothAddress() -> BTAddress? {
     return nil
     #endif
 }
-
-func registerPairing(with address: BTAddress) -> Bool {
-    #if canImport(IOBluetooth)
-    guard let device = IOBluetoothDevice(addressString: address.display) else { return false }
-    let pair = IOBluetoothDevicePair()
-    pair.setDevice(device)
-    let result = pair.start()
-    return result == kIOReturnSuccess
-    #else
-    return false
-    #endif
-}

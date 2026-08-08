@@ -2,41 +2,75 @@ import Foundation
 
 // MARK: - Argument Parsing
 
-func parseArguments() -> (command: String, args: [String], raw: Bool) {
+struct CLIOptions {
+    var command = "menu"
+    var args: [String] = []
     var raw = false
+    var mac: String?
+    var pin: String?
+    var wireless = true
+}
+
+func parseArguments() -> CLIOptions {
+    var raw = false
+    var mac: String?
+    var pin: String?
+    var wireless = true
     var positional: [String] = []
 
-    for arg in CommandLine.arguments.dropFirst() {
-        if arg == "--raw" {
+    let arguments = Array(CommandLine.arguments.dropFirst())
+    var index = 0
+    while index < arguments.count {
+        switch arguments[index] {
+        case "--raw":
             raw = true
-        } else {
-            positional.append(arg)
+        case "--mac":
+            if index + 1 < arguments.count {
+                mac = arguments[index + 1]
+                index += 1
+            }
+        case "--pin":
+            if index + 1 < arguments.count {
+                pin = arguments[index + 1]
+                index += 1
+            }
+        case "--no-wireless":
+            wireless = false
+        default:
+            positional.append(arguments[index])
         }
+        index += 1
     }
 
-    let command = positional.first ?? "help"
-    let args = Array(positional.dropFirst())
-    return (command, args, raw)
+    var options = CLIOptions(raw: raw, mac: mac, pin: pin, wireless: wireless)
+    if let first = positional.first {
+        options.command = first
+        options.args = Array(positional.dropFirst())
+    }
+    return options
 }
 
 // MARK: - Dispatch
 
-func execute(command: String, args: [String], raw: Bool) {
-    switch command {
+func execute(options: CLIOptions) {
+    switch options.command {
+    case "menu":
+        runMenu()
+
     case "help":
         printHelp()
 
     case "info", "read":
-        executeInfo(raw: raw)
+        executeInfo(raw: options.raw)
 
     case "inspect":
-        executeInspect(raw: raw)
+        executeInspect(raw: options.raw)
 
     case "pair":
-        executePair(args: args, raw: raw)
+        executePair(options: options)
 
     case "unpair":
-        executeUnpair(raw: raw)
+        executeUnpair(raw: options.raw)
 
     case "monitor":
         executeMonitor()
@@ -44,13 +78,73 @@ func execute(command: String, args: [String], raw: Bool) {
     case "play":
         executePlay()
 
+    case "ps3mode", "mode":
+        executePS3Mode()
+
     case "--version", "version":
         print("ds3pair-macos \(DS3Constants.version)")
 
     default:
-        print("Unknown command: \(command)\n")
+        print("Unknown command: \(options.command)\n")
         printHelp()
     }
+}
+
+// MARK: - Interactive Menu
+
+private func runMenu() {
+    while true {
+        printHeader()
+        print("1. Read controller information")
+        print("2. Pair controller")
+        print("3. Pair controller to a specific MAC")
+        print("4. Remove pairing")
+        print("5. Monitor input reports")
+        print("6. Bridge to virtual DS4 (play)")
+        print("7. Check controller mode (pressure / DS3 vs DS4)")
+        print("8. Exit")
+        print()
+        print("Select an option (1-8): ", terminator: "")
+
+        guard let input = readLine() else { return }
+
+        switch input.trimmingCharacters(in: .whitespaces) {
+        case "1":
+            print()
+            executeInfo(raw: false)
+        case "2":
+            print()
+            executePair(options: CLIOptions(command: "pair"))
+        case "3":
+            print()
+            executePair(options: CLIOptions(command: "pair", mac: promptForMAC()))
+        case "4":
+            print()
+            executeUnpair(raw: false)
+        case "5":
+            print()
+            executeMonitor()
+        case "6":
+            print()
+            executePlay()
+        case "7":
+            print()
+            executePS3Mode()
+        case "8":
+            print("Goodbye.")
+            return
+        default:
+            print("Invalid option.")
+        }
+        print()
+    }
+}
+
+private func promptForMAC() -> String? {
+    print("Enter Bluetooth MAC address (e.g. AA:BB:CC:DD:EE:FF): ", terminator: "")
+    guard let input = readLine() else { return nil }
+    let trimmed = input.trimmingCharacters(in: .whitespaces)
+    return trimmed.isEmpty ? nil : trimmed
 }
 
 // MARK: - Commands
@@ -68,6 +162,8 @@ private func executeInfo(raw: Bool) {
         let controllerAddr = try controller.controllerAddress()
 
         printBluetoothInfo(host, controllerAddr: controllerAddr)
+        printLinkKey(controller)
+
         printStatus(opened: true, readable: true)
 
         if raw {
@@ -78,57 +174,243 @@ private func executeInfo(raw: Bool) {
     }
 }
 
-private func executePair(args: [String], raw: Bool) {
+private func printLinkKey(_ controller: DS3Controller) {
+    if let key = try? controller.linkKey() {
+        let keyHex = key.map { String(format: "%02X", $0) }.joined()
+        let keyState = key.allSatisfy { $0 == 0 } ? " (none stored)" : ""
+        print("Link Key    : \(keyHex)\(keyState)")
+        print()
+    }
+}
+
+// MARK: - Mode diagnosis
+
+/// Detects whether the controller is presenting as a real DualShock 3 HID
+/// device (with live analog pressure on the face buttons) or as the DS4-clone
+/// mask many knockoffs expose, then guides the user into PS3 mode.
+///
+/// Clones expose two HID interfaces (SDL0 "PS3 Controller" + SDL1 "HID");
+/// the pressure lives on the second one, so every interface is monitored and
+/// analyzed independently.
+private func executePS3Mode() {
+    let devices = DS3Controller.allDS3Devices()
+    guard !devices.isEmpty else {
+        printHeader()
+        print("Error: \(DS3Error.deviceNotFound.description)")
+        print()
+        return
+    }
+
+    printHeader()
+    print("HID interfaces detected: \(devices.count)")
+    if devices.count > 1 {
+        print("This controller exposes multiple HID interfaces (PCSX2 shows these as")
+        print("SDL0 \"PS3 Controller\" and SDL1 \"HID\"). The SDL numbering may differ")
+        print("from the listing below — the analog pressure lives on the HID interface.")
+    }
+    print()
+
+    struct Interface {
+        var controller: DS3Controller
+        var collector: PressureCollector
+        var label: String
+        var descriptorSizes: [Int]
+    }
+
+    var interfaces: [Interface] = []
+
+    for (index, device) in devices.enumerated() {
+        do {
+            let controller = try DS3Controller(device: device)
+            let name = DS3Controller.productName(of: device)
+            let collector = PressureCollector()
+            try controller.startMonitoring(callback: { collector.add($0) })
+            let sizes = controller.reportDescriptor().map(inputReportSizes) ?? []
+            interfaces.append(Interface(
+                controller: controller,
+                collector: collector,
+                label: "Interface #\(index) — \(name)",
+                descriptorSizes: sizes
+            ))
+            print("  Interface #\(index) — \(name) (input reports \(sizes.isEmpty ? "unknown" : sizes.map(String.init).joined(separator: ", ")) bytes)")
+        } catch {
+            print("  Interface #\(index) — \(DS3Controller.productName(of: device)): failed to open (\(error))")
+        }
+    }
+    print()
+
+    guard !interfaces.isEmpty else {
+        print("No interface could be opened for monitoring.")
+        print()
+        return
+    }
+
+    print("Pressure probe")
+    print("──────────────")
+    print("Press and hold the X (Cross) button, varying how hard you press")
+    print("it (light → firm → light) for about 6 seconds. Do not touch the")
+    print("sticks or any other button.")
+    print("Press Enter to start the probe, or q to skip.")
+    print()
+    let skip = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() == "q"
+
+    if !skip {
+        interfaces.forEach { $0.collector.begin() }
+        let start = Date()
+        while Date().timeIntervalSince(start) < 6.0 {
+            CFRunLoopRunInMode(.defaultMode, 0.25, false)
+        }
+        interfaces.forEach { $0.collector.finish() }
+        print()
+    }
+
+    var pressureFound = false
+    for interface in interfaces {
+        let snapshot = interface.collector.snapshot()
+        let cross = detectCross(in: snapshot.samples)
+        let diagnosis = analyzeDevice(
+            snapshot.samples,
+            lengths: snapshot.lengths,
+            label: interface.label,
+            descriptorSizes: interface.descriptorSizes,
+            cross: cross
+        )
+        printModeDiagnosis(diagnosis)
+        if diagnosis.pressureResolved { pressureFound = true }
+    }
+
+    if pressureFound {
+        print("✓ Pressure data found — the controller is in (or close to) DualShock 3 mode.")
+        print("  SDL will expose the analog pressure over USB right away. For Bluetooth,")
+        print("  run `pair` to write the host address, then connect via BlueZ sixaxis on")
+        print("  Linux (or the macOS wireless handshake for genuine controllers).")
+    } else {
+        print("✗ No analog pressure seen on any interface — the controller is showing the")
+        print("  DS4-clone mask. Try the combos below, then re-run this command.")
+    }
+    print()
+
+    printModeSwitchGuide()
+
+    interfaces.forEach { $0.controller.close() }
+}
+
+private func executePair(options: CLIOptions) {
+    printHeader()
+    print("DS3 Pairing\n")
+
+    var targetAddress: BTAddress
+
+    if let macString = options.args.first ?? options.mac {
+        guard let addr = BTAddress(string: macString) else {
+            print("Invalid MAC address: \(macString)")
+            return
+        }
+        targetAddress = addr
+    } else if let localAddr = discoverLocalBluetoothAddress() {
+        print("Target: this Mac (\(localAddr.display))\n")
+        targetAddress = localAddr
+    } else {
+        print("Could not discover local Bluetooth address.")
+        guard let input = promptForMAC(), let addr = BTAddress(string: input) else {
+            print("Invalid address.")
+            return
+        }
+        targetAddress = addr
+    }
+
     do {
-        let controller = try DS3Controller()
+        let watcher = DS3Watcher()
+        try watcher.start()
+        defer { watcher.stop() }
+
+        if !watcher.currentDevices().isEmpty {
+            print("A DualShock 3 is currently connected.")
+            print("Please disconnect it from USB/Bluetooth.\n")
+            print("Waiting for disconnect...")
+            watcher.waitForDisconnect()
+            print("Controller disconnected.\n")
+        }
+
+        print("1. Disconnect the controller from USB/Bluetooth.")
+        print("2. Press the PS button when instructed.\n")
+        print("Waiting for controller...")
+
+        guard let device = watcher.waitForAppearance() else {
+            print("Cancelled.")
+            return
+        }
+
+        print("Controller detected.\n")
+
+        let controller = try DS3Controller(device: device)
         defer { controller.close() }
 
-        printHeader()
-        printControllerInfo(controller)
+        let controllerAddr = try controller.controllerAddress()
+        print("Controller address: \(controllerAddr.display)\n")
 
-        var targetAddress: BTAddress
+        if controller.transport == "USB" {
+            print("Pairing controller with this Mac...")
+            try controller.setPairedHost(targetAddress)
+            print("Pairing address written.\n")
 
-        if let macString = args.first {
-            guard let addr = BTAddress(string: macString) else {
-                print("Invalid MAC address: \(macString)")
-                return
+            if options.raw {
+                let report = try controller.readPairingReport()
+                hexDump(report)
             }
-            targetAddress = addr
-        } else {
-            print("Discovering local Bluetooth adapter...")
-            if let localAddr = discoverLocalBluetoothAddress() {
-                print("Found: \(localAddr.display)\n")
-                targetAddress = localAddr
+
+            if options.wireless {
+                runWirelessHandshake(controllerAddr, pins: options.pin.map { [$0] } ?? DS3Constants.pairingPINs)
             } else {
-                print("Could not discover local Bluetooth address.")
-                print("Enter Bluetooth MAC address: ", terminator: "")
-                guard let input = readLine(), let addr = BTAddress(string: input) else {
-                    print("Invalid address.")
-                    return
-                }
-                targetAddress = addr
+                print("Wireless handshake skipped (--no-wireless).\n")
+                print("The pairing address is saved in the controller. It is now paired")
+                print("to this Mac over USB; run `play` to bridge it to a virtual DS4.")
             }
-        }
-
-        try controller.setPairedHost(targetAddress)
-        let hostAfter = try controller.pairedHost()
-
-        printBluetoothInfo(hostAfter)
-        printStatus(opened: true, readable: true, written: true, verified: hostAfter == targetAddress)
-
-        if hostAfter == targetAddress {
-            print("✓ Pairing appears successful.")
+            print("Done.")
         } else {
-            print("⚠ Write completed, but controller reports a different host.")
-        }
-
-        if raw {
-            let report = try controller.readPairingReport()
-            hexDump(report)
+            print("Controller is already connected via Bluetooth.")
+            print("Pairing successful.\n")
+            print("Done.")
         }
     } catch {
         print("Error: \(error)")
     }
+}
+
+private func runWirelessHandshake(_ controllerAddr: BTAddress, pins: [String]) {
+    print("Wireless handshake")
+    print("──────────────────")
+    print("1. Unplug the USB cable, then press and hold the PS button to power")
+    print("   the controller on.")
+    print("   (Many clones also page the host while still on USB — you can try")
+    print("   pressing PS with it plugged in first, then unplug if nothing links.)")
+    print("2. Keep it off USB while this tool registers it with the macOS")
+    print("   Bluetooth stack. Genuine controllers use PIN 0000; clones may use")
+    print("   another legacy PIN, so candidate PINs are tried in turn.")
+    print("   Candidates: \(pins.joined(separator: ", "))\n")
+
+    print("Note: while the controller stays on USB it will not answer Bluetooth")
+    print("pages. For a wireless link it must be off USB and powered (PS held).")
+    print("If every attempt fails instantly with a daemon error (0x…), the macOS")
+    print("Bluetooth stack is rejecting this controller, not the PIN.\n")
+
+    let systemPairer = SystemPairer()
+    switch systemPairer.pairPersistent(with: controllerAddr, pinList: pins) {
+    case .success:
+        print()
+        print("✓ Controller paired with the macOS Bluetooth stack")
+        if let pin = systemPairer.lastSuccessfulPIN {
+            print("  (legacy PIN \(pin)).")
+        }
+        print("Press the PS button any time to connect it wirelessly.")
+    case .failure(let message):
+        print("⚠ \(message)")
+        print()
+        print("The pairing address is saved in the controller. On modern macOS the")
+        print("classic Bluetooth 2 wireless link may not complete; use the controller")
+        print("over USB, or bridge it with the virtual DS4 (`play` command).")
+    }
+    print()
 }
 
 private func executeUnpair(raw: Bool) {
@@ -342,6 +624,7 @@ func printHelp() {
     print("DualShock 3 Pair Utility")
     print("Version \(DS3Constants.version)\n")
     print("Usage:\n")
+    print("  ds3pair-macos                     Show interactive menu")
     print("  ds3pair-macos info                Show controller information")
     print("  ds3pair-macos read                Read pairing information")
     print("  ds3pair-macos inspect             Inspect controller details")
@@ -350,11 +633,18 @@ func printHelp() {
     print("  ds3pair-macos unpair              Unpair controller")
     print("  ds3pair-macos monitor             Monitor input reports")
     print("  ds3pair-macos play                Bridge DS3 to virtual DS4")
+    print("  ds3pair-macos ps3mode             Detect DS3 vs DS4-clone HID mode")
     print("  ds3pair-macos help                Show this help\n")
     print("Flags:\n")
-    print("  --raw                             Show raw hex dumps\n")
+    print("  --raw                             Show raw hex dumps")
+    print("  --mac <MAC>                       Pair to a specific MAC address")
+    print("  --pin <PIN>                       Use only this legacy pairing PIN")
+    print("  --no-wireless                     Skip the wireless handshake")
     print("Examples:\n")
     print("  ds3pair-macos pair AA:BB:CC:DD:EE:FF")
+    print("  ds3pair-macos pair --mac AA:BB:CC:DD:EE:FF")
+    print("  ds3pair-macos pair --pin 1234     Try a clone controller's PIN")
+    print("  ds3pair-macos pair --no-wireless")
     print("  ds3pair-macos info --raw")
     print("  ds3pair-macos monitor")
 }
