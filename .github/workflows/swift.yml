@@ -6,6 +6,7 @@ name: Swift
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
 
@@ -16,7 +17,27 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: swift build -v
-    - name: Run tests
-      run: swift test -v
+
+    - name: Run tests (release)
+      run: swift test -c release
+
+    - name: Build universal binary
+      run: swift build -c release --arch arm64 --arch x86_64
+
+    - name: Create distributable archive
+      run: |
+        REF_NAME="${GITHUB_REF_NAME//\//-}"
+        mkdir -p dist
+        cp .build/apple/Products/Release/ds3pair-macos dist/
+        cd dist
+        shasum -a 256 ds3pair-macos > ds3pair-macos.sha256
+        zip -r ../ds3pair-macos-${REF_NAME}.zip ds3pair-macos ds3pair-macos.sha256
+        cd ..
+        shasum -a 256 ds3pair-macos-${REF_NAME}.zip
+
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ds3pair-macos-${{ github.ref_name }}
+        path: ds3pair-macos-*.zip
+        if-no-files-found: error
