@@ -7,6 +7,7 @@ enum DS3Error: Error, CustomStringConvertible {
     case openFailed(IOReturn)
     case reportReadFailed(IOReturn)
     case reportWriteFailed(IOReturn)
+    case invalidLinkKey
 
     var description: String {
         switch self {
@@ -18,6 +19,8 @@ enum DS3Error: Error, CustomStringConvertible {
             return "Failed to read report (error: 0x\(String(code, radix: 16, uppercase: true)))."
         case .reportWriteFailed(let code):
             return "Failed to write report (error: 0x\(String(code, radix: 16, uppercase: true)))."
+        case .invalidLinkKey:
+            return "Link key must be exactly 16 bytes."
         }
     }
 }
@@ -214,6 +217,26 @@ class DS3Controller: @unchecked Sendable {
             report[2 + i] = addrBytes[i]
         }
         try writeFeatureReport(Array(report[0..<8]))
+    }
+
+    /// Writes the host address plus a pre-shared 16-byte link key into the
+    /// pairing report. Connecting to a host that already has this key lets the
+    /// controller skip the legacy PIN exchange. Some clones fix the link-key
+    /// region in firmware and ignore the write, so read the report back to
+    /// verify before relying on it.
+    func setPairing(host: BTAddress, linkKey key: [UInt8]) throws {
+        guard key.count == 16 else { throw DS3Error.invalidLinkKey }
+        var report = try readPairingReport()
+        report[0] = 0x01
+        report[1] = 0x00
+        let addrBytes = host.reportBytes
+        for i in 0..<6 {
+            report[2 + i] = addrBytes[i]
+        }
+        for i in 0..<16 {
+            report[16 + i] = key[i]
+        }
+        try writeFeatureReport(Array(report[0..<32]))
     }
 
     // MARK: - Monitor

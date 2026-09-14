@@ -35,6 +35,7 @@ Run the menu with no arguments:
 | `inspect` | Same as `info` with extra raw detail |
 | `pair` | Auto-discover the Mac's address, write it to the controller over USB |
 | `pair <MAC>` | Pair to a specific address (`AA:BB:CC:DD:EE:FF`) |
+| `pairkey <MAC> <KEY>` | Pair to a specific address **and** a pre-shared 16-byte link key |
 | `unpair` | Clear the stored pairing address |
 | `monitor` | Stream input reports from the controller |
 | `play` | Bridge the DS3's input to a virtual DualShock 4 |
@@ -48,6 +49,7 @@ Flags:
 | `--raw` | Print raw hex dumps of feature reports |
 | `--mac <MAC>` | Pair to a specific MAC address |
 | `--pin <PIN>` | Use only this legacy pairing PIN during the wireless handshake |
+| `--link-key <HEX>` | Write a 16-byte link key (32 hex chars) when pairing |
 | `--no-wireless` | Write the pairing address only; skip the wireless handshake |
 
 Examples:
@@ -57,6 +59,7 @@ ds3pair-macos pair AA:BB:CC:DD:EE:FF
 ds3pair-macos pair --mac AA:BB:CC:DD:EE:FF
 ds3pair-macos pair --pin 1234
 ds3pair-macos pair --no-wireless
+ds3pair-macos pairkey AA:BB:CC:DD:EE:FF 8A130000000004000202020200000004
 ds3pair-macos info --raw
 ds3pair-macos monitor
 ```
@@ -73,6 +76,27 @@ ds3pair-macos monitor
 
 The key write is report `0xF5` (via IOHID feature reports), the same technique
 as the classic Linux `sixpair` utility.
+
+## Pairing with a pre-shared link key
+
+The controller's pairing report also stores a 16-byte **Bluetooth link key**
+(shown by `info`). If the host you want to connect to already has this key, the
+controller can skip the legacy PIN exchange entirely:
+
+```sh
+ds3pair-macos pairkey AA:BB:CC:DD:EE:FF 8A130000000004000202020200000004
+```
+
+or pass the key as a flag to `pair`:
+
+```sh
+ds3pair-macos pair AA:BB:CC:DD:EE:FF --link-key 8A130000000004000202020200000004
+```
+
+The tool writes the host address **and** the link key over USB, then reads the
+report back and verifies both. Caveat: clones often hold fixed firmware bytes
+in the link-key region and ignore the write — if the read-back shows a
+mismatch the controller does not support a preset key.
 
 ## Genuine vs clone controllers
 

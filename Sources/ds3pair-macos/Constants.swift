@@ -1,7 +1,7 @@
 import Foundation
 
 enum DS3Constants {
-    static let version = "0.0.4a"
+    static let version = "0.0.4b"
     static let sonyVID: Int = 0x054C
     static let ds3PID: Int = 0x0268
     static let pairingReportID: UInt8 = 0xF5

@@ -8,6 +8,7 @@ struct CLIOptions {
     var raw = false
     var mac: String?
     var pin: String?
+    var linkKey: String?
     var wireless = true
 }
 
@@ -15,6 +16,7 @@ func parseArguments() -> CLIOptions {
     var raw = false
     var mac: String?
     var pin: String?
+    var linkKey: String?
     var wireless = true
     var positional: [String] = []
 
@@ -34,6 +36,11 @@ func parseArguments() -> CLIOptions {
                 pin = arguments[index + 1]
                 index += 1
             }
+        case "--link-key":
+            if index + 1 < arguments.count {
+                linkKey = arguments[index + 1]
+                index += 1
+            }
         case "--no-wireless":
             wireless = false
         default:
@@ -42,12 +49,28 @@ func parseArguments() -> CLIOptions {
         index += 1
     }
 
-    var options = CLIOptions(raw: raw, mac: mac, pin: pin, wireless: wireless)
+    var options = CLIOptions(raw: raw, mac: mac, pin: pin, linkKey: linkKey, wireless: wireless)
     if let first = positional.first {
         options.command = first
         options.args = Array(positional.dropFirst())
     }
     return options
+}
+
+/// Parses a 16-byte link key from hex (32 chars, optional spaces/":"
+/// separators). Returns nil if it is not exactly 16 bytes.
+func parseLinkKeyHex(_ string: String) -> [UInt8]? {
+    let cleaned = string.uppercased().filter { $0.isHexDigit }
+    guard cleaned.count == 32 else { return nil }
+    var bytes: [UInt8] = []
+    var index = cleaned.startIndex
+    while index < cleaned.endIndex {
+        let next = cleaned.index(index, offsetBy: 2)
+        guard let value = UInt8(cleaned[index..<next], radix: 16) else { return nil }
+        bytes.append(value)
+        index = next
+    }
+    return bytes
 }
 
 // MARK: - Dispatch
@@ -68,6 +91,9 @@ func execute(options: CLIOptions) {
 
     case "pair":
         executePair(options: options)
+
+    case "pairkey":
+        executePairKey(options: options)
 
     case "unpair":
         executeUnpair(raw: options.raw)
@@ -295,6 +321,85 @@ private func executePS3Mode() {
     interfaces.forEach { $0.controller.close() }
 }
 
+private func printPairKeyUsage() {
+    print("Usage: ds3pair-macos pairkey <MAC> <KEYHEX>")
+    print("  MAC    : host Bluetooth address to pair to (AA:BB:CC:DD:EE:FF)")
+    print("  KEYHEX : 16-byte link key as 32 hex characters")
+    print("Example: ds3pair-macos pairkey 1C:91:80:D1:B7:CD 8A130000000004000202020200000004")
+}
+
+/// Pair the controller (over USB) with a specific host address and a
+/// pre-shared 16-byte link key, then reads the report back to verify.
+private func executePairKey(options: CLIOptions) {
+    guard let macString = options.args.first ?? options.mac, let addr = BTAddress(string: macString) else {
+        printPairKeyUsage()
+        return
+    }
+
+    let keyHex: String?
+    if options.args.count > 1 {
+        keyHex = options.args[1]
+    } else {
+        keyHex = options.linkKey
+    }
+
+    guard let keyHex = keyHex, let key = parseLinkKeyHex(keyHex) else {
+        printPairKeyUsage()
+        print()
+        print("Link key must be 16 bytes (32 hex characters), e.g.")
+        print("  8A130000000004000202020200000004")
+        return
+    }
+
+    do {
+        let controller = try DS3Controller()
+        defer { controller.close() }
+
+        printHeader()
+        printControllerInfo(controller)
+
+        let beforeKey = (try? controller.linkKey()) ?? []
+        let beforeHex = beforeKey.map { String(format: "%02X", $0) }.joined()
+        let beforeHost = (try? controller.pairedHost()) ?? .zero
+
+        print("Before")
+        print("──────")
+        printBluetoothInfo(beforeHost, controllerAddr: try controller.controllerAddress())
+        print("Link Key    : \(beforeHex.isEmpty ? "none" : beforeHex)")
+        print()
+
+        try controller.setPairing(host: addr, linkKey: key)
+
+        let host = try controller.pairedHost()
+        let written = try controller.linkKey()
+        let writtenHex = written.map { String(format: "%02X", $0) }.joined()
+
+        print("After")
+        print("─────")
+        printBluetoothInfo(host, controllerAddr: try controller.controllerAddress())
+        print("Link Key    : \(writtenHex)")
+        print()
+
+        let hostOK = host == addr
+        let keyOK = writtenHex == keyHex.uppercased().filter { $0.isHexDigit }
+
+        print("  Host address : \(hostOK ? "✓ written" : "✗ mismatch \(host.display)")")
+        print("  Link key     : \(keyOK ? "✓ written and verified" : "✗ not stored")")
+        print()
+
+        if hostOK && keyOK {
+            print("The controller is now paired to \(addr.display) with the provided")
+            print("link key. Connect it to a host that has the same key stored.")
+        } else if hostOK {
+            print("The host address was written, but the link key did not stick — the")
+            print("controller likely fixes the link-key region in firmware (common on")
+            print("clones) and ignores those writes.")
+        }
+    } catch {
+        print("Error: \(error)")
+    }
+}
+
 private func executePair(options: CLIOptions) {
     printHeader()
     print("DS3 Pairing\n")
@@ -351,8 +456,19 @@ private func executePair(options: CLIOptions) {
 
         if controller.transport == "USB" {
             print("Pairing controller with this Mac...")
-            try controller.setPairedHost(targetAddress)
-            print("Pairing address written.\n")
+            if let keyHex = options.linkKey {
+                if let key = parseLinkKeyHex(keyHex) {
+                    try controller.setPairing(host: targetAddress, linkKey: key)
+                    print("Pairing address and link key written.\n")
+                } else {
+                    print("⚠ Invalid link key (\(keyHex)) ignored - writing address only.\n")
+                    try controller.setPairedHost(targetAddress)
+                    print("Pairing address written.\n")
+                }
+            } else {
+                try controller.setPairedHost(targetAddress)
+                print("Pairing address written.\n")
+            }
 
             if options.raw {
                 let report = try controller.readPairingReport()
@@ -630,6 +746,7 @@ func printHelp() {
     print("  ds3pair-macos inspect             Inspect controller details")
     print("  ds3pair-macos pair                Auto-discover and pair")
     print("  ds3pair-macos pair <MAC>          Pair to specific address")
+    print("  ds3pair-macos pairkey <MAC> <KEY> Pair with a specific link key")
     print("  ds3pair-macos unpair              Unpair controller")
     print("  ds3pair-macos monitor             Monitor input reports")
     print("  ds3pair-macos play                Bridge DS3 to virtual DS4")
@@ -639,12 +756,14 @@ func printHelp() {
     print("  --raw                             Show raw hex dumps")
     print("  --mac <MAC>                       Pair to a specific MAC address")
     print("  --pin <PIN>                       Use only this legacy pairing PIN")
+    print("  --link-key <HEX>                  Write a 16-byte link key (32 hex chars)")
     print("  --no-wireless                     Skip the wireless handshake")
     print("Examples:\n")
     print("  ds3pair-macos pair AA:BB:CC:DD:EE:FF")
     print("  ds3pair-macos pair --mac AA:BB:CC:DD:EE:FF")
     print("  ds3pair-macos pair --pin 1234     Try a clone controller's PIN")
     print("  ds3pair-macos pair --no-wireless")
+    print("  ds3pair-macos pairkey AA:BB:CC:DD:EE:FF 8A130000000004000202020200000004")
     print("  ds3pair-macos info --raw")
     print("  ds3pair-macos monitor")
 }

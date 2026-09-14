@@ -172,3 +172,31 @@ func makePairingReport(byte14: UInt8 = 0x01, byte15: UInt8 = 0xA0) -> [UInt8] {
 @Test func boardRevisionShortReport() {
     #expect(decodeBoardRevision([0xF5, 0x01]) == "Unknown")
 }
+
+// MARK: - Link Key Parsing Tests
+
+@Test func linkKeyParseValid() {
+    #expect(parseLinkKeyHex("8A130000000004000202020200000004") == [
+        0x8A, 0x13, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+        0x02, 0x02, 0x02, 0x02, 0x00, 0x00, 0x00, 0x04,
+    ])
+}
+
+@Test func linkKeyParseLowercase() {
+    #expect(parseLinkKeyHex("8a130000000004000202020200000004") == parseLinkKeyHex("8A130000000004000202020200000004"))
+}
+
+@Test func linkKeyParseWithSeparators() {
+    #expect(parseLinkKeyHex("8A:13:00:00:00:00:00:04:00:02:02:02:02:00:00:04")?.count == 16)
+}
+
+@Test func linkKeyParseZeroKey() {
+    #expect(parseLinkKeyHex("00000000000000000000000000000000") == [UInt8](repeating: 0, count: 16))
+}
+
+@Test func linkKeyParseInvalid() {
+    #expect(parseLinkKeyHex("0000") == nil)
+    #expect(parseLinkKeyHex("") == nil)
+    #expect(parseLinkKeyHex("GG130000000004000202020200000004") == nil)
+    #expect(parseLinkKeyHex("8A13000000000400020202020000") == nil)
+}
